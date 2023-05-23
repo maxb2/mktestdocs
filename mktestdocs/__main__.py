@@ -59,6 +59,7 @@ FENCED_BLOCK_RE = re.compile(
     dedent(
         r"""
         (?P<raw>
+            [ \t]*                                    # indent
             (?P<fence>^(?:~{3,}|`{3,}))[ ]*           # opening fence
             (
                 (\{(?P<attrs>[^\}\n]*)\})|            # (optional {attrs} or
@@ -80,6 +81,7 @@ FENCED_BLOCK_RE = re.compile(
             )
             \n                                        # newline (end of opening fence)
             (?P<code>.*?)(?<=\n)                      # the code block
+            [ \t]*                                    # indent
             (?P=fence)[ ]*$                           # closing fence
         )
         """
@@ -206,7 +208,7 @@ def register_executor(lang, executor):
     _executors[lang] = executor
 
 
-def exec_bash(fence: Fence):
+def exec_bash(fence: Fence, **kwargs):
     """Exec the bash source given in a new subshell
 
     Does not return anything, but if any command returns not-0 an error
@@ -240,6 +242,7 @@ def exec_python(fence: Fence, __globals: Optional[Dict] = None):
 
 
 register_executor("", exec_python)
+register_executor(None, exec_python)
 register_executor("python", exec_python)
 
 
@@ -254,7 +257,7 @@ def get_codeblock_members(*classes):
         for name, member in inspect.getmembers(cl):
             if member.__doc__:
                 results.append(member)
-    return [m for m in results if len(grab_code_blocks(m.__doc__)) > 0]
+    return [m for m in results if len(grab_code_blocks(dedent(m.__doc__))) > 0]
 
 
 def check_codeblock(block, lang="python"):
@@ -296,6 +299,7 @@ def grab_code_blocks(docstring, lang="python"):
             block += line + "\n"
     return [c for c in codeblocks if c != ""]
 
+
 def grab_fences(source: str) -> List[Fence]:
     """Grab fences in  markdown
 
@@ -307,8 +311,10 @@ def grab_fences(source: str) -> List[Fence]:
     """
     return [Fence.from_re_groups(groups) for groups in FENCED_BLOCK_RE.findall(source)]
 
+
 def grab_code_blocks(docstring, **kwargs):
     return grab_fences(docstring)
+
 
 def check_docstring(obj, lang=""):
     """
@@ -324,18 +330,34 @@ def check_docstring(obj, lang=""):
         executor(b)
 
 
-def check_raw_string(raw, lang="python"):
+def check_raw_string(raw, **kwargs):
     """
     Given a raw string, test the contents.
     """
-    if lang not in _executors:
-        raise LookupError(
-            f"{lang} is not a supported language to check\n"
-            "\tHint: you can add support for any language by using register_executor"
-        )
-    executor = _executors[lang]
-    for b in grab_code_blocks(raw, lang=lang):
-        executor(b)
+
+    for fence in grab_code_blocks(raw):
+        lang = fence.lang
+        if lang not in _executors:
+            raise LookupError(
+                f"{lang} is not a supported language to check\n"
+                "\tHint: you can add support for any language by using register_executor"
+            )
+        _executors[lang](fence, **kwargs)
+
+
+def check_fences(fences: List[Fence], **kwargs):
+    """
+    Given a raw string, test the contents.
+    """
+
+    for fence in fences:
+        lang = fence.lang
+        if lang not in _executors:
+            raise LookupError(
+                f"{lang} is not a supported language to check\n"
+                "\tHint: you can add support for any language by using register_executor"
+            )
+        _executors[lang](fence, **kwargs)
 
 
 def check_raw_file_full(raw, lang="python"):
@@ -351,6 +373,20 @@ def check_raw_file_full(raw, lang="python"):
     executor(all_code)
 
 
+def merge_fences(fences: List[Fence]) -> List[Fence]:
+    langs: OrderedDict[str, Fence] = OrderedDict()
+    for fence in fences:
+        if fence.lang in langs:
+            langs[fence.lang] = Fence(
+                lang=fence.lang,
+                contents=langs[fence.lang].contents + "\n" + fence.contents,
+            )
+        else:
+            langs[fence.lang] = fence
+
+    return list(langs.values())
+
+
 def check_md_file(fpath, memory=False, lang="python"):
     """
     Given a markdown file, parse the contents for python code blocks
@@ -361,10 +397,11 @@ def check_md_file(fpath, memory=False, lang="python"):
         memory: whether or not previous code-blocks should be remembered
     """
     text = pathlib.Path(fpath).read_text()
-    if not memory:
-        check_raw_string(text, lang=lang)
+    fences = grab_code_blocks(text)
+    if memory:
+        check_fences(merge_fences(fences))
     else:
-        check_raw_file_full(text, lang=lang)
+        check_fences(fences)
 
 
 class WorkingDirectory:
@@ -381,87 +418,84 @@ class WorkingDirectory:
         os.chdir(self.origin)
 
 
-_executors = {}
+# _executors = {}
 
 
-def register_executor(lang, executor):
-    """Add a new executor for markdown code blocks
+# def register_executor(lang, executor):
+#     """Add a new executor for markdown code blocks
 
-    lang should be the tag used after the opening ```
-    executor should be a callable that takes one argument:
-        the code block found
-    """
-    _executors[lang] = executor
-
-
-def grab_fences(source: str) -> List[Fence]:
-    """Grab fences in  markdown
-
-    Args:
-        source (str): markdown string
-
-    Returns:
-        List[Fence]: list of fences in markdown
-    """
-    return [Fence.from_re_groups(groups) for groups in FENCED_BLOCK_RE.findall(source)]
+#     lang should be the tag used after the opening ```
+#     executor should be a callable that takes one argument:
+#         the code block found
+#     """
+#     _executors[lang] = executor
 
 
-def exec_file_fence(fence: Fence, **kwargs):
-    """Executor that writes out file
+# def grab_fences(source: str) -> List[Fence]:
+#     """Grab fences in  markdown
 
-    Args:
-        fence (Fence): markdown fence
-    """
-    fname = fence.options.get("title", None) or fence.attrs.get("title", [None])[0]
-    with open(fname, "w") as f:
-        f.write(fence.contents)
+#     Args:
+#         source (str): markdown string
 
-
-register_executor("yaml", exec_file_fence)
-register_executor("yml", exec_file_fence)
-register_executor("toml", exec_file_fence)
+#     Returns:
+#         List[Fence]: list of fences in markdown
+#     """
+#     return [Fence.from_re_groups(groups) for groups in FENCED_BLOCK_RE.findall(source)]
 
 
-def exec_python_fence(fence: Fence, globals: Dict = {}):
-    """Python fence executor
+# def exec_file_fence(fence: Fence, **kwargs):
+#     """Executor that writes out file
 
-    Args:
-        fence (Fence): markdown fence
-        globals (Dict, optional): python globals to pass to exec. Defaults to {}.
-    """
-    if fence.options.get("title", False) or fence.attrs.get("title", False):
-        exec_file_fence(fence)
-    try:
-        exec(fence.contents, globals)
-    except Exception:
-        print(fence.contents)
-        raise
+#     Args:
+#         fence (Fence): markdown fence
+#     """
+#     fname = fence.options.get("title", None) or fence.attrs.get("title", [None])[0]
+#     with open(fname, "w") as f:
+#         f.write(fence.contents)
 
 
-register_executor("python", exec_python_fence)
-register_executor("py", exec_python_fence)
+# register_executor("yaml", exec_file_fence)
+# register_executor("yml", exec_file_fence)
+# register_executor("toml", exec_file_fence)
 
 
-def exec_bash_fence(fence: Fence, **kwargs):
-    """Bash fence executor
+# def exec_python_fence(fence: Fence, globals: Dict = {}):
+#     """Python fence executor
 
-    Args:
-        fence (Fence): markdown fence
-    """
-    _cmds = fence.contents.split("$ ")
-    commands: List[Dict] = []
-    for _cmd in _cmds:
-        if not _cmd:
-            continue
-        lines = _cmd.splitlines()
-        commands.append({"input": lines[0], "output": "\n".join(lines[1:])})
-
-    for command in commands:
-        result = run(command["input"], shell=True, check=True, capture_output=True)
-        assert result.stdout.decode().strip() == command["output"].strip()
+#     Args:
+#         fence (Fence): markdown fence
+#         globals (Dict, optional): python globals to pass to exec. Defaults to {}.
+#     """
+#     if fence.options.get("title", False) or fence.attrs.get("title", False):
+#         exec_file_fence(fence)
+#     try:
+#         exec(fence.contents, globals)
+#     except Exception:
+#         print(fence.contents)
+#         raise
 
 
-register_executor("bash", exec_bash_fence)
+# register_executor("python", exec_python_fence)
+# register_executor("py", exec_python_fence)
 
 
+# def exec_bash_fence(fence: Fence, **kwargs):
+#     """Bash fence executor
 
+#     Args:
+#         fence (Fence): markdown fence
+#     """
+#     _cmds = fence.contents.split("$ ")
+#     commands: List[Dict] = []
+#     for _cmd in _cmds:
+#         if not _cmd:
+#             continue
+#         lines = _cmd.splitlines()
+#         commands.append({"input": lines[0], "output": "\n".join(lines[1:])})
+
+#     for command in commands:
+#         result = run(command["input"], shell=True, check=True, capture_output=True)
+#         assert result.stdout.decode().strip() == command["output"].strip()
+
+
+# register_executor("bash", exec_bash_fence)
