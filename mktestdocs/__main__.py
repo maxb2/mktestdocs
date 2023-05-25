@@ -399,6 +399,7 @@ def check_md_file(fpath, memory=False, lang="python"):
     text = pathlib.Path(fpath).read_text()
     fences = grab_code_blocks(text)
     if memory:
+        # TODO: use https://pypi.org/project/pytest-shell/ for bash "memory"
         check_fences(merge_fences(fences))
     else:
         check_fences(fences)
